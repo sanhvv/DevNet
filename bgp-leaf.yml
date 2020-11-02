@@ -1,0 +1,99 @@
+---
+- hosts: leaf 
+  connection: local
+  gather_facts: no
+  tasks:
+
+  - name: Ensure BGP is enabled
+    nxos_feature:
+     feature: bgp
+     state: enabled
+
+  - name: set layer 3 on interfaces
+    nxos_interface:
+      interface: "{{item}}"
+      mode: layer3
+    with_items:
+      - "{{interface}}"
+
+  - name: disable ip redirects BFD
+    nxos_command:
+      commands:
+        - configure
+        - "interface {{item}}"
+        - no ip redirects
+        - no ipv6 redirects
+    with_items:
+      - "{{interface}}"
+
+  - name: Create IP address
+    nxos_l3_interface:
+      name: "{{ item.0 }}"
+      ipv4: "{{ item.1 }}/31"
+      state: present
+    with_together:
+      - "{{interface}}"
+      - "{{interface_ip}}"
+
+  - name: Configure my ASN
+    nxos_bgp:
+      asn: "{{asn}}"
+      log_neighbor_changes: true
+      router_id: "{{ ansible_host }}"
+      state: present
+      graceful_restart: no
+
+  - name: Configure BGP ECMP
+    nxos_bgp_af:
+      asn: "{{asn}}"
+      afi: ipv4
+      safi: unicast
+      maximum_paths: 8
+      state: present
+
+  - name: create template for spine
+    nxos_command:
+      commands:
+        - configure
+        - "router bgp {{asn}}"
+        - template peer spine
+        - remote-as 65004
+        - password 3 8fee507eecb6b2a401bf925a89661aa8
+        - address-family ipv4 unicast
+        - soft-reconfiguration inbound always
+
+  - name: Configure BGP neighbor for spines
+    nxos_bgp_neighbor:
+      asn: "{{asn}}"
+      neighbor: "{{item}}"
+      #update_source: "{{item.1}}"
+      state: present
+    with_items:
+      - "{{neighbor_ip}}"
+
+  - name: Create BGP neighbor to inherit template spine
+    nxos_command:
+      commands:
+        - configure
+        - "router bgp {{asn}}"
+        - "neighbor {{item}}"
+        - inherit peer spine
+    with_items:
+        - "{{neighbor_ip}}"
+
+  - name: Create route-map for direct routes
+    nxos_command:
+      commands:
+        - configure
+        - ip prefix-list permit-any seq 5 permit 0.0.0.0/0 le 32
+        - route-map direct-to-bgp permit 10
+        - match ip address prefix-list permit-any
+
+  - name: Redistribute direct routes
+    nxos_bgp_af:
+      asn: "{{asn}}"
+      afi: ipv4
+      safi: unicast
+      maximum_paths: 8
+      redistribute: [['direct', 'direct-to-bgp']]
+      state: present

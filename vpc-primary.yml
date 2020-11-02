@@ -1,0 +1,114 @@
+---
+- hosts: primary 
+  gather_facts: no
+  connection: local
+  tasks:
+
+  - name: Ensure lacp is enabled
+    nxos_feature:
+     feature: lacp
+     state: enabled
+
+  - name: Ensure vPC is enabled
+    nxos_feature:
+     feature: vpc
+     state: enabled
+
+  - name: Ensure hsrp is enabled
+    nxos_feature:
+      feature: hsrp
+      state: enabled
+
+  - name: Ensure interface vlan is enabled
+    nxos_feature:
+      feature: interface-vlan
+      state: enabled
+
+  - name: Ensure vlans are present
+    nxos_config:
+      lines:
+        - vlan {{ item }}
+    with_items:
+      - "{{ vlan_id }}"
+
+  - name: Spanning tree best practices
+    nxos_config:
+      lines:
+        - spanning-tree port type edge bpduguard default
+        - spanning-tree vlan {{ root_vlan }} priority 0
+
+  - name: Configure vpc parameters
+    nxos_vpc:
+      domain: "{{ vpc_domain }}"
+      role_priority: 100
+      peer_gw: true
+      pkl_dest: "{{ oob_secondary }}"
+      pkl_src: "{{ oob_primary }}"
+      auto_recovery: true
+      delay_restore: 240
+
+  - name: VPC Best Practices
+    nxos_config:
+      lines:
+        - peer-switch
+        - auto-recovery reload-delay 300
+        - delay restore interface-vlan 240
+        - ip arp synchronize
+      parents: vpc domain {{ vpc_domain }}
+
+  - name: VPC Peer link
+    nxos_interface:
+      interface: portchannel"{{ group }}"
+      description: "vPC peer link"
+      mode: layer2
+
+  - name: Add physical interfaces to port-channel123
+    nxos_linkagg:
+      group: "{{ group }}"
+      members: "{{ peer_link_member }}"
+      mode: 'active'
+      state: present
+
+  - name: Set trunk mode to the vpc peer link
+    nxos_l2_interface:
+      name: port-channel123
+      mode: trunk
+
+  - name: Add vlans to the vpc peer link
+    nxos_config:
+      lines:
+        - switchport trunk allowed vlan none
+        - switchport trunk allowed vlan add {{ vlan }}
+      parents: interface port-channel {{ group }}
+
+  - name: Set po123 to be vpc peerlink
+    nxos_vpc_interface:
+      portchannel: "{{ group }}"
+      peer_link: true
+
+  - name: Config IP Addresses for SVI
+    nxos_command:
+      commands:
+        - configure
+        - "interface Vlan{{ item.0 }}"
+        - no ip redirects
+        - no ipv6 redirects
+        - ip address {{ item.1 }}
+        - no shutdown
+    with_together:
+      - "{{ vlan_id }}"
+      - "{{ vpc_primary_vlan_ip }}"
+
+  - name: Create HSRP
+    nxos_hsrp:
+      version: 2
+      interface: Vlan{{ item.0 }}
+      group: "{{ item.1 }}"
+      vip: "{{ item.2 }}"
+      priority: 110
+      auth_type: md5
+      auth_string: Shopee-LAN
+    with_together:
+      - "{{ vlan_id }}"
+      - "{{ vlan_id }}"
+      - "{{ vip }}"
